@@ -1,0 +1,354 @@
+--[[
+    สคริปต์ปัดลูกบอลอัตโนมัติ
+    โดย TomTamX
+    
+    วิธีใช้:
+    1. เปิดปุ่ม "ปัดอัตโนมัติ" เพื่อให้ระบบปัดลูกบอลให้อัตโนมัติ
+    2. กดปุ่ม E เพื่อปัดลูกบอลด้วยตัวเอง (ใช้ได้แม้ปิดปุ่มปัดอัตโนมัติ)
+    3. ปรับ "ความเร็วปัด" เพื่อตั้งค่าความถี่ในการปัดลูกบอล
+    4. ปรับ "ระยะปัด" เพื่อตั้งค่าระยะทางในการปัดลูกบอล
+    5. เปิด "โหมดต่อสู้" สำหรับการเล่นที่ต้องการความเร็วสูงสุด
+]]
+
+local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
+local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+
+local Window = Fluent:CreateWindow({
+    Title = "ปัดลูกบอล",
+    SubTitle = "โดย TomTamX",
+    TabWidth = 160,
+    Size = UDim2.fromOffset(580, 460),
+    Acrylic = false,
+    Theme = "Dark",
+    MinimizeKey = Enum.KeyCode.LeftControl
+})
+
+local Tabs = {
+    Main = Window:AddTab({ Title = "ตั้งค่า", Icon = "" }),
+    Stats = Window:AddTab({ Title = "สถิติ", Icon = "chart" }),
+    Settings = Window:AddTab({ Title = "อื่นๆ", Icon = "settings" })
+}
+
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local UserInputService = game:GetService("UserInputService")
+
+local Player = Players.LocalPlayer
+local Cooldown = tick()
+local IsParried = false
+local Connection = nil
+local LastParryTime = 0
+local ParryDelay = 0.05
+local ParryDistance = 0.45
+local LastBallTarget = nil
+local IsSpeedMode = false
+local AutoParryEnabled = false
+local IsCombatMode = false
+
+-- สถิติ
+local Stats = {
+    TotalParries = 0,
+    SuccessfulParries = 0,
+    FailedParries = 0,
+    Score = 0,
+    CurrentGrade = "F",
+    LastUpdate = tick()
+}
+
+-- UI Elements สำหรับสถิติ
+local ScoreLabel = Tabs.Stats:AddParagraph({
+    Title = "คะแนน",
+    Content = "0"
+})
+
+local GradeLabel = Tabs.Stats:AddParagraph({
+    Title = "เกรดปัจจุบัน",
+    Content = "F"
+})
+
+local SuccessRateLabel = Tabs.Stats:AddParagraph({
+    Title = "อัตราการปัดสำเร็จ",
+    Content = "0%"
+})
+
+local AutoParryConnection = nil
+
+local function UpdateGrade()
+    local successRate = Stats.SuccessfulParries / (Stats.TotalParries > 0 and Stats.TotalParries or 1)
+    if successRate >= 0.9 then
+        Stats.CurrentGrade = "S"
+    elseif successRate >= 0.8 then
+        Stats.CurrentGrade = "A"
+    elseif successRate >= 0.7 then
+        Stats.CurrentGrade = "B"
+    elseif successRate >= 0.6 then
+        Stats.CurrentGrade = "C"
+    elseif successRate >= 0.5 then
+        Stats.CurrentGrade = "D"
+    else
+        Stats.CurrentGrade = "F"
+    end
+end
+
+local function UpdateStats()
+    local successRate = (Stats.SuccessfulParries / (Stats.TotalParries > 0 and Stats.TotalParries or 1)) * 100
+    ScoreLabel:SetDesc(tostring(Stats.Score))
+    GradeLabel:SetDesc(Stats.CurrentGrade)
+    SuccessRateLabel:SetDesc(string.format("%.1f%%", successRate))
+end
+
+local function GetBall()
+    if not workspace:FindFirstChild("Balls") then
+        return nil
+    end
+    
+    for _, Ball in ipairs(workspace.Balls:GetChildren()) do
+        if Ball:GetAttribute("realBall") then
+            return Ball
+        end
+    end
+    return nil
+end
+
+local function ResetConnection()
+    if Connection then
+        Connection:Disconnect()
+        Connection = nil
+    end
+end
+
+local function HandleParryResult(success)
+    if success then
+        Stats.SuccessfulParries = Stats.SuccessfulParries + 1
+        Stats.Score = Stats.Score + 1
+    else
+        Stats.FailedParries = Stats.FailedParries + 1
+        Stats.Score = math.max(0, Stats.Score - 1) -- ลดคะแนนแต่ไม่ให้ต่ำกว่า 0
+    end
+    Stats.TotalParries = Stats.TotalParries + 1
+    UpdateGrade()
+    UpdateStats()
+end
+
+local function SetupBallConnection()
+    local Ball = GetBall()
+    if not Ball then return end
+    
+    ResetConnection()
+    Connection = Ball:GetAttributeChangedSignal("target"):Connect(function()
+        local currentTarget = Ball:GetAttribute("target")
+        if LastBallTarget == Player.Name and currentTarget ~= Player.Name then
+            -- ถ้าลูกบอลเปลี่ยนเป้าหมายจากเราไปคนอื่น แสดงว่าปัดพลาด
+            HandleParryResult(false)
+        end
+        LastBallTarget = currentTarget
+        IsParried = false
+    end)
+end
+
+workspace.Balls.ChildAdded:Connect(SetupBallConnection)
+SetupBallConnection()
+
+local ManualParryKey = Enum.KeyCode.E
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not gameProcessed and input.KeyCode == ManualParryKey then
+        local Ball = GetBall()
+        if Ball and Ball:GetAttribute("target") == Player.Name then
+            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+            task.wait(0.1)
+            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+            HandleParryResult(true)
+        end
+    end
+end)
+
+local function PerformParry()
+    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+    if IsCombatMode then
+        task.wait(0.01)
+    elseif IsSpeedMode then
+        task.wait(0.05)
+    else
+        task.wait(0.1)
+    end
+    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+end
+
+local function StartAutoParry()
+    if AutoParryConnection then return end
+    
+    AutoParryConnection = RunService.PreSimulation:Connect(function()
+        if not AutoParryEnabled then
+            StopAutoParry()
+            return
+        end
+        
+        if not Player.Character then
+            return
+        end
+        
+        local Ball, HRP = GetBall(), Player.Character:FindFirstChild("HumanoidRootPart")
+        if not Ball or not HRP then
+            return
+        end
+        
+        if (tick() - Cooldown) >= 1 then
+            IsParried = false
+        end
+        
+        local zoomies = Ball:FindFirstChild("zoomies")
+        if not zoomies then
+            return
+        end
+        
+        local Speed = zoomies.VectorVelocity.Magnitude
+        local Distance = (HRP.Position - Ball.Position).Magnitude
+        
+        local targetDistance
+        local currentParryDelay
+        
+        if IsCombatMode then
+            targetDistance = ParryDistance * 0.6
+            currentParryDelay = 0.01
+        elseif IsSpeedMode then
+            targetDistance = ParryDistance * 0.8
+            currentParryDelay = ParryDelay * 0.7
+        else
+            targetDistance = ParryDistance
+            currentParryDelay = ParryDelay
+        end
+        
+        local target = Ball:GetAttribute("target")
+        if target and target == Player.Name and not IsParried and Distance / Speed <= targetDistance then
+            if tick() - LastParryTime >= currentParryDelay then
+                PerformParry()
+                IsParried = true
+                Cooldown = tick()
+                LastParryTime = tick()
+                HandleParryResult(true)
+            end
+        end
+    end)
+end
+
+local function StopAutoParry()
+    if AutoParryConnection then
+        AutoParryConnection:Disconnect()
+        AutoParryConnection = nil
+    end
+end
+
+-- UI Elements
+local Options = Fluent.Options
+
+do
+    local Parry = Tabs.Main:AddToggle("Parry", {Title = "ปัดอัตโนมัติ", Default = false })
+    
+    local CombatMode = Tabs.Main:AddToggle("CombatMode", {
+        Title = "โหมดต่อสู้",
+        Description = "เพิ่มความเร็วสูงสุดสำหรับการต่อสู้แบบมาโคร",
+        Default = false
+    })
+    
+    local SpeedMode = Tabs.Main:AddToggle("SpeedMode", {
+        Title = "โหมดความเร็วสูง",
+        Description = "เพิ่มความเร็วในการปัดสำหรับการเล่นที่ต้องการความเร็วสูง",
+        Default = false
+    })
+    
+    local ParryDelaySlider = Tabs.Main:AddSlider("ParryDelay", {
+        Title = "ความเร็วปัด",
+        Description = "ตั้งค่าความถี่ในการปัดลูกบอล (แนะนำ: 0.05)",
+        Default = 0.05,
+        Min = 0.01,
+        Max = 0.2,
+        Rounding = 3,
+        Callback = function(value)
+            ParryDelay = value
+        end
+    })
+    
+    local ParryDistanceSlider = Tabs.Main:AddSlider("ParryDistance", {
+        Title = "ระยะปัด",
+        Description = "ตั้งค่าระยะทางในการปัดลูกบอล (แนะนำ: 0.45)",
+        Default = 0.45,
+        Min = 0.35,
+        Max = 0.55,
+        Rounding = 2,
+        Callback = function(value)
+            ParryDistance = value
+        end
+    })
+
+    Parry:OnChanged(function()
+        AutoParryEnabled = Options.Parry.Value
+        if AutoParryEnabled then
+            StartAutoParry()
+            Fluent:Notify({
+                Title = "ระบบปัดอัตโนมัติ",
+                Content = "เปิดใช้งานระบบปัดอัตโนมัติ",
+                Duration = 2
+            })
+        else
+            StopAutoParry()
+            Fluent:Notify({
+                Title = "ระบบปัดอัตโนมัติ",
+                Content = "ปิดใช้งานระบบปัดอัตโนมัติ",
+                Duration = 2
+            })
+        end
+    end)
+
+    CombatMode:OnChanged(function()
+        IsCombatMode = Options.CombatMode.Value
+        if IsCombatMode then
+            IsSpeedMode = false
+            Options.SpeedMode:SetValue(false)
+        end
+        Fluent:Notify({
+            Title = "โหมดต่อสู้",
+            Content = IsCombatMode and "เปิดใช้งานโหมดต่อสู้" or "ปิดใช้งานโหมดต่อสู้",
+            Duration = 2
+        })
+    end)
+
+    SpeedMode:OnChanged(function()
+        IsSpeedMode = Options.SpeedMode.Value
+        if IsSpeedMode then
+            IsCombatMode = false
+            Options.CombatMode:SetValue(false)
+        end
+        Fluent:Notify({
+            Title = "เปลี่ยนโหมด",
+            Content = IsSpeedMode and "เปิดใช้งานโหมดความเร็วสูง" or "ปิดใช้งานโหมดความเร็วสูง",
+            Duration = 2
+        })
+    end)
+
+    Options.Parry:SetValue(false)
+    Options.SpeedMode:SetValue(false)
+end
+
+SaveManager:SetLibrary(Fluent)
+InterfaceManager:SetLibrary(Fluent)
+
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({})
+
+InterfaceManager:SetFolder("TomTamX")
+SaveManager:SetFolder("TomTamX/BladeBall")
+
+InterfaceManager:BuildInterfaceSection(Tabs.Settings)
+SaveManager:BuildConfigSection(Tabs.Settings)
+
+Window:SelectTab(1)
+
+Fluent:Notify({
+    Title = "TomTamX",
+    Content = "สคริปต์พร้อมใช้งาน\nกดปุ่ม E เพื่อปัดลูกบอลด้วยตัวเอง",
+    Duration = 8
+})
+
+SaveManager:LoadAutoloadConfig() 
